@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySQL Browser Client</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <div>
+            <div class="brand-kicker">LOCAL DATABASE CONSOLE</div>
+            <h1>MySQL Browser Client</h1>
+          </div>
+        </div>
+        <div class="target-bar">
+          <label class="target-select-wrap">
+            <span>连接</span>
+            <select id="header-connection" aria-label="选择连接"></select>
+          </label>
+          <label class="target-select-wrap">
+            <span>数据库</span>
+            <select id="header-database" aria-label="选择数据库"></select>
+          </label>
+          <label class="target-select-wrap theme-select-wrap">
+            <span>主题</span>
+            <select id="theme-select" aria-label="切换工作区主题">
+              <option value="emerald">翡翠暗色</option>
+              <option value="ocean">深海蓝</option>
+              <option value="amber">琥珀暗色</option>
+              <option value="light">明亮灰白</option>
+            </select>
+          </label>
+          <span id="environment-badge" class="environment-badge">OFFLINE</span>
+          <button id="connection-settings" class="button ghost compact" type="button">连接设置</button>
+        </div>
+      </header>
+
+      <main id="main-grid" class="main-grid">
+        <aside id="source-panel" class="panel source-panel">
+          <div class="panel-header">
+            <div>
+              <span class="eyebrow">SOURCES</span>
+              <strong>数据源</strong>
+            </div>
+            <div class="panel-header-actions">
+              <button id="add-connection" class="icon-button" type="button" aria-label="新增连接">＋</button>
+              <button id="collapse-source" class="icon-button" type="button" title="收起数据源" aria-label="收起数据源">‹</button>
+            </div>
+          </div>
+          <div id="connection-list" class="connection-list scroll-region"></div>
+          <div class="panel-rail">
+            <button id="expand-source" class="icon-button" type="button" title="展开数据源" aria-label="展开数据源">›</button>
+            <span>数据源</span>
+          </div>
+          <div id="source-resizer" class="vertical-resizer" role="separator" aria-label="调整数据源面板宽度"></div>
+        </aside>
+
+        <aside id="object-panel" class="panel object-panel">
+          <div class="panel-header">
+            <div>
+              <span class="eyebrow">SCHEMA</span>
+              <strong id="database-title">库表</strong>
+            </div>
+            <div class="panel-header-actions">
+              <span id="table-count" class="counter">0</span>
+              <button id="collapse-objects" class="icon-button" type="button" title="收起表列表" aria-label="收起表列表">‹</button>
+            </div>
+          </div>
+          <div class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="table-search" type="search" placeholder="搜索表、视图或说明" autocomplete="off">
+          </div>
+          <div id="table-list" class="table-list scroll-region"></div>
+          <div class="panel-rail">
+            <button id="expand-objects" class="icon-button" type="button" title="展开表列表" aria-label="展开表列表">›</button>
+            <span>库表</span>
+          </div>
+          <div id="object-resizer" class="vertical-resizer" role="separator" aria-label="调整表列表面板宽度"></div>
+        </aside>
+
+        <section id="workspace" class="workspace">
+          <section id="inspector" class="inspector">
+            <div class="tabbar inspector-tabbar">
+              <div id="inspector-tabs" class="tabs">
+                <button class="tab active" type="button" data-inspector-tab="columns">字段</button>
+                <button class="tab" type="button" data-inspector-tab="indexes">索引</button>
+                <button class="tab" type="button" data-inspector-tab="foreignKeys">外键</button>
+              </div>
+              <div id="table-meta" class="table-meta">请选择一张表</div>
+              <button id="collapse-inspector" class="button ghost tiny" type="button">收起结构</button>
+            </div>
+            <div id="inspector-body" class="inspector-body scroll-region"></div>
+            <div class="inspector-rail">
+              <span class="eyebrow">TABLE STRUCTURE</span>
+              <strong>字段 / 索引 / 外键</strong>
+              <button id="expand-inspector" class="button ghost tiny" type="button">展开结构</button>
+            </div>
+            <div id="inspector-resizer" class="horizontal-resizer" role="separator" aria-label="调整结构面板高度"></div>
+          </section>
+
+          <section class="query-workspace">
+            <div class="query-heading">
+              <div>
+                <span class="eyebrow">QUERY DESK</span>
+                <strong id="query-target">未选择数据库</strong>
+              </div>
+              <span id="query-limit" class="counter">—</span>
+            </div>
+            <div class="query-tabs-row">
+              <div id="query-tabs" class="query-tabs"></div>
+              <button id="add-query-tab" class="query-tab-add" type="button" aria-label="新增查询页签">＋</button>
+            </div>
+            <div id="editor-shell" class="editor-shell">
+              <div class="editor-gutter" aria-hidden="true"><span>SQL</span><span id="editor-lines">1</span></div>
+              <textarea id="sql-editor" spellcheck="false" placeholder="SELECT * FROM `table_name` LIMIT 100"></textarea>
+              <div id="sql-completion" class="sql-completion" role="listbox" hidden></div>
+              <div class="editor-actions">
+                <div class="button-row">
+                  <button id="run-query" class="button primary" type="button">运行查询</button>
+                  <button id="run-explain" class="button ghost" type="button">EXPLAIN</button>
+                </div>
+                <span class="shortcut">⌘/Ctrl + Space 补全 · ⌘/Ctrl + Enter 运行</span>
+              </div>
+              <div id="editor-resizer" class="horizontal-resizer editor-resizer" role="separator" aria-label="调整 SQL 面板高度"></div>
+            </div>
+            <div class="result-section">
+              <div class="tabbar result-tabbar">
+                <div id="result-tabs" class="tabs">
+                  <button class="tab active" type="button" data-result-tab="result">结果</button>
+                  <button class="tab" type="button" data-result-tab="explain">执行计划</button>
+                  <button class="tab" type="button" data-result-tab="audit">审计</button>
+                </div>
+                <div class="result-actions">
+                  <span id="result-count" class="counter">0 行</span>
+                  <button id="export-csv" class="button ghost tiny" type="button">CSV</button>
+                  <button id="export-text" class="button ghost tiny" type="button">文本</button>
+                </div>
+              </div>
+              <div id="result-body" class="result-body scroll-region"></div>
+            </div>
+          </section>
+        </section>
+      </main>
+
+      <footer class="statusbar">
+        <div><span id="status-dot" class="status-dot"></span><span id="status-text">正在连接本地服务…</span></div>
+        <div id="status-detail">NATIVE HOST</div>
+      </footer>
+    </div>
+
+    <div id="context-menu-root"></div>
+    <div id="modal-root"></div>
+    <div id="toast-root" aria-live="polite"></div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

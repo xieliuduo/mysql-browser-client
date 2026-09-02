@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "MySQL Browser Client",
+  "version": "0.2.0",
+  "description": "Browse MySQL schemas and run controlled SQL through a local native host.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAwDc96wR3akrmB/kakCUShudwGUQ+VTS2a04OJQ9oXE5gXCTk9+xIKhmZzczUwXpJpKAsvtEFZnS+z3TzQ9WF6XAVRM1EqzvE+CPF8W73CzLWGCRxKkoEyKr2u4VCu9cqIl/MwbHJKMKiEV+L1WBGYkqYIICNf9sMVViXHOvJH4VcPpMy77CbqwyxqJP+k6jNwkWpnBE4q6SPn7vN5oiw+w8Hyf9B+0bEiiIo3LQ/phyZrp3te5l89aQiaWThXmi533aGPdcGuJDPA5xk8BGYQ2dfL5kcwqd1ZavuxLHpfyqq9K01lPeA0nx2iZMDZt+QeoLLlyg8l5ThV+LvP/UbkQIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "打开 MySQL Browser Client"
+  }
+}
