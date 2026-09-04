@@ -89,3 +89,46 @@ test('rejects writes in scripts before opening a database connection', async () 
   }), /read-only scripts/)
   assert.equal(opened, false)
 })
+
+test('allows a confirmed one-time row limit above the connection default', async () => {
+  const calls = []
+  const client = {
+    async query(input) {
+      const sql = typeof input === 'string' ? input : input.sql
+      calls.push(sql)
+      if (/^SELECT COUNT\(\*\)/i.test(sql)) return [[[2]], [{ name: 'totalCount' }]]
+      if (/^SELECT/i.test(sql)) return [[[1], [2]], [{ name: 'id', columnType: 8 }]]
+      return [{ affectedRows: 0 }, []]
+    },
+    async end() {},
+  }
+  const service = serviceWithClient(client)
+
+  await assert.rejects(() => service.query({
+    connectionId: connection.id,
+    database: 'demo',
+    sql: 'SELECT id FROM user',
+    limit: 500,
+  }), /confirmation/i)
+
+  const result = await service.query({
+    connectionId: connection.id,
+    database: 'demo',
+    sql: 'SELECT id FROM user',
+    limit: 500,
+    temporaryLimitConfirmed: true,
+  })
+  assert.equal(result.rowCount, 2)
+  assert.ok(calls.includes('SET SESSION sql_select_limit = 500'))
+})
+
+test('rejects one-time row limits above the hard maximum', async () => {
+  const service = serviceWithClient({ async query() {}, async end() {} })
+  await assert.rejects(() => service.query({
+    connectionId: connection.id,
+    database: 'demo',
+    sql: 'SELECT id FROM user',
+    limit: 1001,
+    temporaryLimitConfirmed: true,
+  }), /invalid/i)
+})

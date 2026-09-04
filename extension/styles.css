@@ -120,6 +120,9 @@ h1{margin:2px 0 0;font:700 17px/1 var(--font-display);letter-spacing:.035em}
 .environment-badge{padding:5px 8px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font:800 9px/1 var(--font-mono);letter-spacing:.08em}
 .environment-badge.production{color:#ff9c9c;border-color:#9a4343;background:#3c1717}
 .environment-badge.test{color:#8ee5c9;border-color:#27745f}.environment-badge.local{color:#8bc8ff;border-color:#315d80}
+.query-limit-control{height:28px;display:flex;align-items:center;gap:5px;padding:0 7px;border:1px solid var(--line);border-radius:8px;background:var(--control-bg);color:var(--faint);font:700 9px/1 var(--font-mono);white-space:nowrap}
+.query-limit-control input{width:72px;height:22px;padding:0 5px;border:1px solid var(--line-soft);border-radius:5px;background:var(--input-bg);color:var(--text);font:700 10px/1 var(--font-mono);outline:0}
+.query-limit-control input:focus{border-color:var(--mint)}.query-limit-control input:disabled{opacity:.45}.query-limit-control input::placeholder{color:var(--faint)}
 .button,.icon-button,.query-tab-add{
   border:1px solid var(--line);border-radius:8px;background:var(--ink-3);color:var(--text);
   min-height:30px;padding:0 11px;font-weight:700;font-size:11px;transition:.15s ease

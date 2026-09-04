@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.8] - 2026-09-04
+
+### Added
+
+- Added a one-time query row-limit control with `500` and `1000` presets and custom values from `1` to `1000`.
+- Added confirmation when a one-time limit exceeds the connection default.
+
+### Changed
+
+- One-time limits are consumed by the next query and immediately reset to the connection default.
+- The Native Host validates elevated limits independently while retaining query timeout and read-only protections.
+
 ## [0.2.7] - 2026-09-04
 
 ### Added

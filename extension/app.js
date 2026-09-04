@@ -119,6 +119,7 @@ const refs = {
   inspectorBody: $('#inspector-body'),
   queryTarget: $('#query-target'),
   queryLimit: $('#query-limit'),
+  queryLimitOnce: $('#query-limit-once'),
   openSavedQueries: $('#open-saved-queries'),
   savedQueryCount: $('#saved-query-count'),
   queryTabs: $('#query-tabs'),
@@ -659,7 +660,11 @@ function renderQueryTabs() {
   refs.sqlEditor.value = tab?.sql || ''
   updateEditorPresentation()
   refs.queryTarget.textContent = target() ? `${activeConnection().label} / ${state.database}` : '未选择数据库'
-  refs.queryLimit.textContent = activeConnection() ? `${activeConnection().environment === 'production' ? Math.min(100, activeConnection().maxRows) : activeConnection().maxRows} rows max` : '—'
+  const defaultLimit = activeConnection()
+    ? activeConnection().environment === 'production' ? Math.min(100, activeConnection().maxRows) : activeConnection().maxRows
+    : null
+  refs.queryLimit.textContent = defaultLimit ? `默认 ${defaultLimit}` : '默认 —'
+  refs.queryLimitOnce.disabled = !defaultLimit
   refs.savedQueryCount.textContent = String(savedQueriesForScope().length)
   refs.openSavedQueries.disabled = !target()
   closeSqlCompletion()
@@ -983,6 +988,7 @@ async function chooseConnection(connectionId) {
     state.productionAllowed.add(connection.id)
   }
   state.connectionId = connection.id
+  refs.queryLimitOnce.value = ''
   persisted.lastConnectionId = connection.id
   state.database = ''
   state.databases = []
@@ -1021,6 +1027,7 @@ async function chooseConnection(connectionId) {
 
 async function chooseDatabase(database) {
   if (!database || database === state.database) return
+  refs.queryLimitOnce.value = ''
   state.database = database
   persisted.lastDatabaseByConnection[state.connectionId] = database
   await savePersisted()
@@ -1139,6 +1146,30 @@ function sqlRoot(sql) {
   return String(sql || '').trimStart().match(/^([A-Za-z]+)/)?.[1]?.toLowerCase() || ''
 }
 
+function consumeQueryLimit(method, mutating) {
+  const connection = activeConnection()
+  const defaultLimit = connection?.environment === 'production'
+    ? Math.min(100, connection.maxRows)
+    : connection?.maxRows
+  if (!defaultLimit || method !== METHODS.QUERY || mutating) {
+    return { limit: defaultLimit, temporaryLimitConfirmed: false }
+  }
+  const raw = refs.queryLimitOnce.value.trim()
+  if (!raw) return { limit: defaultLimit, temporaryLimitConfirmed: false }
+  const requested = Number(raw)
+  if (!Number.isSafeInteger(requested) || requested < 1 || requested > 1000) {
+    notify('本次查询行数必须是 1–1000 的整数', true)
+    refs.queryLimitOnce.focus()
+    return null
+  }
+  const elevated = requested > defaultLimit
+  if (elevated && !window.confirm(`本次查询将临时把返回上限从 ${defaultLimit} 行提高到 ${requested} 行。\n\n设置只生效一次，查询后自动恢复默认。是否继续？`)) {
+    return null
+  }
+  refs.queryLimitOnce.value = ''
+  return { limit: requested, temporaryLimitConfirmed: elevated }
+}
+
 async function executeQuery(method) {
   const requestTarget = target()
   const tab = activeQueryTab()
@@ -1149,6 +1180,8 @@ async function executeQuery(method) {
   const mutating = method === METHODS.QUERY && MUTATING_ROOTS.has(sqlRoot(sql))
   if (mutating && !window.confirm(`确认执行 ${sqlRoot(sql).toUpperCase()} 写操作？\n\n${activeConnection().label} / ${state.database}\n\n${sql.slice(0, 600)}`)) return
   if (mutating && activeConnection().environment === 'production' && !window.confirm(`再次确认在生产库执行写操作？\n\n${sql.slice(0, 600)}`)) return
+  const queryLimit = consumeQueryLimit(method, mutating)
+  if (!queryLimit) return
   const queriedAt = new Date().toISOString()
   setBusy(true)
   try {
@@ -1156,7 +1189,8 @@ async function executeQuery(method) {
       ...requestTarget,
       sql,
       writeConfirmed: mutating,
-      limit: activeConnection().environment === 'production' ? 100 : activeConnection().maxRows,
+      limit: queryLimit.limit,
+      temporaryLimitConfirmed: queryLimit.temporaryLimitConfirmed,
     })
     const resultKey = method === METHODS.EXPLAIN ? 'explain' : 'result'
     tab.results[resultKey] = { ...value, queriedAt, sourceSql }
@@ -1886,6 +1920,11 @@ function bindEvents() {
   })
   refs.sqlEditor.addEventListener('blur', () => window.setTimeout(() => closeSqlCompletion(), 120))
   refs.runQuery.addEventListener('click', () => executeQuery(METHODS.QUERY))
+  refs.queryLimitOnce.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return
+    event.preventDefault()
+    executeQuery(METHODS.QUERY)
+  })
   refs.formatSql.addEventListener('click', beautifySql)
   refs.runExplain.addEventListener('click', () => executeQuery(METHODS.EXPLAIN))
   refs.saveQuery.addEventListener('click', openSaveQueryModal)

@@ -13,9 +13,22 @@ import { WorkspaceStore, WorkspaceStoreError } from './workspace-store.js'
 const DEFAULT_AUDIT_LIMIT = 200
 const PRODUCTION_MAX_ROWS = 100
 const PRODUCTION_TIMEOUT_MS = 8000
+const MAX_TEMPORARY_ROWS = 1000
 
 function asInteger(value, fallback, min, max) {
   return Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback
+}
+
+function queryRowLimit(value, defaultLimit, confirmed = false) {
+  if (value === undefined || value === '') return defaultLimit
+  const requested = Number(value)
+  if (!Number.isSafeInteger(requested) || requested < 1 || requested > MAX_TEMPORARY_ROWS) {
+    throw new ConnectionStoreError(`temporary query limit is invalid; expected 1-${MAX_TEMPORARY_ROWS}`, 'INVALID_QUERY_LIMIT')
+  }
+  if (requested > defaultLimit && confirmed !== true) {
+    throw new ConnectionStoreError('temporary query limit confirmation is required', 'TEMPORARY_LIMIT_CONFIRMATION_REQUIRED')
+  }
+  return requested
 }
 
 function jsonValue(value) {
@@ -267,7 +280,7 @@ export class MysqlBrowserService {
   async executeSql(sql, targetInput, { limit, operation = 'query' } = {}) {
     const target = await this.resolveTarget(targetInput)
     const limits = this.connectionLimits(target.connection)
-    const rowLimit = asInteger(limit, limits.maxRows, 1, limits.maxRows)
+    const rowLimit = queryRowLimit(limit, limits.maxRows, targetInput.temporaryLimitConfirmed)
     const started = Date.now()
     const rawSql = typeof sql === 'string' ? sql : ''
     const targetAudit = { connectionId: target.connection.id, database: target.database, environment: target.connection.environment }
@@ -371,7 +384,7 @@ export class MysqlBrowserService {
   async executeReadOnlyScript(sql, targetInput, { limit } = {}) {
     const target = await this.resolveTarget(targetInput)
     const limits = this.connectionLimits(target.connection)
-    const rowLimit = asInteger(limit, limits.maxRows, 1, limits.maxRows)
+    const rowLimit = queryRowLimit(limit, limits.maxRows, targetInput.temporaryLimitConfirmed)
     const started = Date.now()
     const rawSql = typeof sql === 'string' ? sql : ''
     const targetAudit = { connectionId: target.connection.id, database: target.database, environment: target.connection.environment }
@@ -546,7 +559,7 @@ export class MysqlBrowserService {
   async handle(method, rawParams = {}) {
     try {
       const params = assertPayload(rawParams)
-      if (method === METHODS.PING) return ok({ status: 'ready', version: '0.2.7', platform: process.platform })
+      if (method === METHODS.PING) return ok({ status: 'ready', version: '0.2.8', platform: process.platform })
       if (method === METHODS.CONNECTIONS) return ok(await this.listConnections())
       if (method === METHODS.CONNECTION_CREATE) return ok(await this.createConnection(params))
       if (method === METHODS.CONNECTION_UPDATE) return ok(await this.updateConnection(params))

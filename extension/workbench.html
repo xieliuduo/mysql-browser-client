@@ -12,7 +12,7 @@
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
           <div>
-            <div class="brand-kicker">LOCAL DATABASE CONSOLE · V0.2.7</div>
+            <div class="brand-kicker">LOCAL DATABASE CONSOLE · V0.2.8</div>
             <h1>MySQL Browser Client</h1>
           </div>
         </div>
@@ -112,7 +112,15 @@
                 <button id="open-saved-queries" class="button ghost tiny" type="button">
                   已保存查询 <span id="saved-query-count">0</span>
                 </button>
-                <span id="query-limit" class="counter">—</span>
+                <label class="query-limit-control" title="仅对下一次查询生效，执行后自动恢复默认；SQL 中显式 LIMIT 仍优先">
+                  <span id="query-limit">默认 —</span>
+                  <input id="query-limit-once" type="number" min="1" max="1000" step="1" list="query-limit-presets" inputmode="numeric" placeholder="本次行数" aria-label="下一次查询临时返回行数">
+                  <span>行</span>
+                </label>
+                <datalist id="query-limit-presets">
+                  <option value="500"></option>
+                  <option value="1000"></option>
+                </datalist>
               </div>
             </div>
             <div class="query-tabs-row">
