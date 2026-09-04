@@ -1,5 +1,5 @@
 import { METHODS, requestMessage } from './protocol.js'
-import { buildRowSql, rowSqlContext, sqlCompletions } from './sql-utils.js'
+import { applyColumnOperation, buildRowSql, classifyColumnType, formatSql, fuzzyTextScore, highlightSql, quoteSqlIdentifier, rowSqlContext, rowTableClipboard, sqlCompletions, stripSqlComments, tableClipboard } from './sql-utils.js'
 
 const STORAGE_KEY = 'mysql-browser-client-workspace-v1'
 const IS_PREVIEW = location.protocol !== 'chrome-extension:'
@@ -41,6 +41,7 @@ const state = {
   productionAllowed: new Set(),
   contextTable: '',
   contextRow: null,
+  contextColumn: null,
   resizing: '',
 }
 
@@ -49,14 +50,17 @@ let persisted = {
   lastDatabaseByConnection: {},
   contexts: {},
   tablePreferences: {},
+  savedQueries: [],
   layout: { ...DEFAULT_LAYOUT },
   theme: 'emerald',
 }
 
 let toastTimer = null
 let querySequence = 0
-let tableClickTimer = null
 let tableDetailSequence = 0
+let browserPersistedSnapshot = null
+let nativePersistTimer = null
+let nativeWorkspaceAvailable = false
 const preview = {
   connections: [{
     id: 'preview-local',
@@ -115,24 +119,31 @@ const refs = {
   inspectorBody: $('#inspector-body'),
   queryTarget: $('#query-target'),
   queryLimit: $('#query-limit'),
+  openSavedQueries: $('#open-saved-queries'),
+  savedQueryCount: $('#saved-query-count'),
   queryTabs: $('#query-tabs'),
   addQueryTab: $('#add-query-tab'),
+  sqlHighlight: $('#sql-highlight'),
   sqlEditor: $('#sql-editor'),
   sqlCompletion: $('#sql-completion'),
   editorLines: $('#editor-lines'),
   editorResizer: $('#editor-resizer'),
   runQuery: $('#run-query'),
+  formatSql: $('#format-sql'),
   runExplain: $('#run-explain'),
   resultTabs: $('#result-tabs'),
+  saveQuery: $('#save-query'),
+  resultQueryMeta: $('#result-query-meta'),
   resultCount: $('#result-count'),
   exportCsv: $('#export-csv'),
-  exportText: $('#export-text'),
+  copyTable: $('#copy-table'),
   resultBody: $('#result-body'),
   statusDot: $('#status-dot'),
   statusText: $('#status-text'),
   statusDetail: $('#status-detail'),
   contextMenuRoot: $('#context-menu-root'),
   modalRoot: $('#modal-root'),
+  savedQueryDrawerRoot: $('#saved-query-drawer-root'),
   toastRoot: $('#toast-root'),
 }
 
@@ -178,6 +189,12 @@ function scopeKey() {
   return state.connectionId && state.database ? JSON.stringify([state.connectionId, state.database]) : ''
 }
 
+function savedQueriesForScope() {
+  return persisted.savedQueries
+    .filter((query) => query.connectionId === state.connectionId && query.database === state.database)
+    .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt)))
+}
+
 function tablePreferences() {
   return persisted.tablePreferences[scopeKey()] || {}
 }
@@ -197,31 +214,110 @@ function activeQueryTab() {
   return state.queryTabs.find((tab) => tab.id === state.activeQueryId) || state.queryTabs[0] || null
 }
 
+function isRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizePersisted(value) {
+  const saved = isRecord(value) ? value : {}
+  return {
+    ...saved,
+    lastConnectionId: typeof saved.lastConnectionId === 'string' ? saved.lastConnectionId : '',
+    lastDatabaseByConnection: isRecord(saved.lastDatabaseByConnection) ? saved.lastDatabaseByConnection : {},
+    contexts: isRecord(saved.contexts) ? saved.contexts : {},
+    tablePreferences: isRecord(saved.tablePreferences) ? saved.tablePreferences : {},
+    savedQueries: Array.isArray(saved.savedQueries) ? saved.savedQueries : [],
+    layout: { ...DEFAULT_LAYOUT, ...(isRecord(saved.layout) ? saved.layout : {}) },
+    theme: THEMES.has(saved.theme) ? saved.theme : 'emerald',
+  }
+}
+
+function mergeTablePreferences(base, override) {
+  const merged = { ...(isRecord(base) ? base : {}) }
+  for (const [scope, preferences] of Object.entries(isRecord(override) ? override : {})) {
+    merged[scope] = {
+      ...(isRecord(merged[scope]) ? merged[scope] : {}),
+      ...(isRecord(preferences) ? preferences : {}),
+    }
+  }
+  return merged
+}
+
+function mergePersisted(base, override) {
+  const nativeValue = normalizePersisted(base)
+  const browserValue = isRecord(override) ? override : {}
+  return normalizePersisted({
+    ...nativeValue,
+    ...browserValue,
+    lastDatabaseByConnection: {
+      ...nativeValue.lastDatabaseByConnection,
+      ...(isRecord(browserValue.lastDatabaseByConnection) ? browserValue.lastDatabaseByConnection : {}),
+    },
+    contexts: {
+      ...nativeValue.contexts,
+      ...(isRecord(browserValue.contexts) ? browserValue.contexts : {}),
+    },
+    tablePreferences: mergeTablePreferences(nativeValue.tablePreferences, browserValue.tablePreferences),
+    layout: {
+      ...nativeValue.layout,
+      ...(isRecord(browserValue.layout) ? browserValue.layout : {}),
+    },
+  })
+}
+
 async function loadPersisted() {
+  let saved = null
   if (IS_PREVIEW) {
     try {
-      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')
-      if (saved && typeof saved === 'object') persisted = { ...persisted, ...saved }
+      saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null')
     } catch {}
-    persisted.layout = { ...DEFAULT_LAYOUT, ...(persisted.layout || {}) }
-    persisted.theme = THEMES.has(persisted.theme) ? persisted.theme : 'emerald'
+    persisted = normalizePersisted(saved)
     return
   }
   try {
     const value = await chrome.storage.local.get(STORAGE_KEY)
-    const saved = value[STORAGE_KEY]
-    if (saved && typeof saved === 'object') persisted = { ...persisted, ...saved }
+    saved = value[STORAGE_KEY]
   } catch {}
-  persisted.layout = { ...DEFAULT_LAYOUT, ...(persisted.layout || {}) }
-  persisted.theme = THEMES.has(persisted.theme) ? persisted.theme : 'emerald'
+  browserPersistedSnapshot = isRecord(saved) ? saved : null
+  persisted = normalizePersisted(saved)
 }
 
-async function savePersisted() {
+async function cachePersistedInBrowser() {
   if (IS_PREVIEW) {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(persisted)) } catch {}
     return
   }
   try { await chrome.storage.local.set({ [STORAGE_KEY]: persisted }) } catch {}
+}
+
+async function loadNativePersisted() {
+  if (IS_PREVIEW || !state.nativeReady) return
+  try {
+    const value = await rpc(METHODS.WORKSPACE_GET)
+    if (isRecord(value?.workspace)) {
+      persisted = browserPersistedSnapshot
+        ? mergePersisted(value.workspace, browserPersistedSnapshot)
+        : normalizePersisted(value.workspace)
+    }
+    await cachePersistedInBrowser()
+    await rpc(METHODS.WORKSPACE_SET, { workspace: persisted })
+    nativeWorkspaceAvailable = true
+  } catch {
+    nativeWorkspaceAvailable = false
+  }
+}
+
+function scheduleNativePersist() {
+  if (!state.nativeReady || !nativeWorkspaceAvailable) return
+  window.clearTimeout(nativePersistTimer)
+  nativePersistTimer = window.setTimeout(() => {
+    rpc(METHODS.WORKSPACE_SET, { workspace: persisted }).catch(() => {})
+  }, 250)
+}
+
+async function savePersisted() {
+  await cachePersistedInBrowser()
+  scheduleNativePersist()
 }
 
 function persistContext() {
@@ -305,6 +401,7 @@ async function previewRpc(method, params = {}) {
             [1002, 'VH-2026-002', 2, '2026-09-02 11:40:03'],
             [1003, 'VH-2026-003', 1, '2026-09-02 11:38:55'],
           ],
+          totalCount: 12842,
           durationMs: 18,
         }
     preview.audit.unshift({
@@ -347,6 +444,7 @@ function setBusy(value) {
   state.busy = value
   refs.runQuery.disabled = value || !target()
   refs.runExplain.disabled = value || !target()
+  refs.saveQuery.disabled = value
   refs.addConnection.disabled = value
 }
 
@@ -499,7 +597,8 @@ function renderTables() {
     const row = element('button', {
       className: `table-row ${state.selectedTable === table.name ? 'active' : ''} ${state.contextTable === table.name ? 'context-open' : ''}`,
       type: 'button',
-      title: `${table.name}\n${table.comment || table.summary || ''}\n双击填写并运行 SELECT 查询`,
+      title: `${table.name}\n${table.comment || table.summary || ''}\n单击选择并运行 SELECT 查询`,
+      dataset: { tableName: table.name },
     })
     if (preference.position) row.append(element('span', { className: 'table-position', text: preference.position === 'top' ? '↑' : '↓' }))
     row.append(
@@ -508,15 +607,9 @@ function renderTables() {
       element('span', { className: 'table-summary', text: table.summary || table.comment || '数据表' }),
     )
     row.addEventListener('click', () => {
-      window.clearTimeout(tableClickTimer)
-      tableClickTimer = window.setTimeout(() => chooseTable(table), 220)
-    })
-    row.addEventListener('dblclick', async (event) => {
-      event.preventDefault()
-      window.clearTimeout(tableClickTimer)
+      chooseTable(table)
       fillTableQuery(table)
-      await chooseTable(table)
-      await executeQuery(METHODS.QUERY)
+      executeQuery(METHODS.QUERY)
     })
     row.addEventListener('contextmenu', (event) => openTableMenu(event, table))
     refs.tableList.append(row)
@@ -564,11 +657,25 @@ function renderQueryTabs() {
   }
   const tab = activeQueryTab()
   refs.sqlEditor.value = tab?.sql || ''
-  refs.editorLines.textContent = String((tab?.sql || '').split('\n').length)
+  updateEditorPresentation()
   refs.queryTarget.textContent = target() ? `${activeConnection().label} / ${state.database}` : '未选择数据库'
   refs.queryLimit.textContent = activeConnection() ? `${activeConnection().environment === 'production' ? Math.min(100, activeConnection().maxRows) : activeConnection().maxRows} rows max` : '—'
+  refs.savedQueryCount.textContent = String(savedQueriesForScope().length)
+  refs.openSavedQueries.disabled = !target()
   closeSqlCompletion()
   if (tab) prefetchSqlSchemas(tab.sql)
+}
+
+function updateEditorPresentation() {
+  const sql = refs.sqlEditor.value
+  refs.editorLines.textContent = String(sql.split('\n').length)
+  refs.sqlHighlight.innerHTML = `${highlightSql(sql)}${sql.endsWith('\n') ? ' ' : ''}`
+  syncEditorScroll()
+}
+
+function syncEditorScroll() {
+  refs.sqlHighlight.scrollTop = refs.sqlEditor.scrollTop
+  refs.sqlHighlight.scrollLeft = refs.sqlEditor.scrollLeft
 }
 
 async function prefetchSqlSchemas(sql) {
@@ -600,6 +707,7 @@ function renderSqlCompletion() {
   refs.sqlCompletion.replaceChildren()
   refs.sqlCompletion.hidden = !state.completionOpen || !state.completions.length
   if (refs.sqlCompletion.hidden) return
+  const fragment = document.createDocumentFragment()
   state.completions.forEach((item, index) => {
     const button = element('button', {
       className: `completion-item ${index === state.completionIndex ? 'active' : ''}`,
@@ -614,16 +722,17 @@ function renderSqlCompletion() {
       event.preventDefault()
       applySqlCompletion(item)
     })
-    refs.sqlCompletion.append(button)
+    fragment.append(button)
   })
+  refs.sqlCompletion.append(fragment)
   refs.sqlCompletion.querySelector('.completion-item.active')?.scrollIntoView({ block: 'nearest' })
 }
 
 function updateSqlCompletion(force = false) {
   const caret = refs.sqlEditor.selectionStart
   const before = refs.sqlEditor.value.slice(0, caret)
-  const prefix = before.match(/([A-Za-z0-9_$]*)$/)?.[1] || ''
-  const contextual = /\.\w*$|\b(?:FROM|JOIN|UPDATE|INTO)\s+`?\w*$/i.test(before)
+  const prefix = before.match(/([\p{L}\p{N}_$-]*)$/u)?.[1] || ''
+  const contextual = /\.[\p{L}\p{N}_$]*$|\b(?:FROM|JOIN|UPDATE|INTO|TABLE)\s+`?[\p{L}\p{N}_$-]*$/iu.test(before)
   const candidates = sqlCompletions(refs.sqlEditor.value, caret, state.tables, state.schemaCache)
   state.completions = candidates
   state.completionIndex = clamp(state.completionIndex, 0, Math.max(0, candidates.length - 1))
@@ -654,7 +763,15 @@ function renderResultTabs() {
 function renderDataTable(columns, rows, options = {}) {
   const table = element('table', { className: 'data-table' })
   const head = element('thead')
-  head.append(element('tr', {}, columns.map((column) => element('th', { text: column.name }))))
+  head.append(element('tr', {}, columns.map((column, columnIndex) => {
+    const header = element('th', {
+      className: `${options.headerContextMenu ? 'result-column-header' : ''} ${state.contextColumn?.key === options.contextKey && state.contextColumn?.columnIndex === columnIndex ? 'context-open' : ''}`,
+      text: column.name,
+      title: options.headerContextMenu ? `${column.name} · 右键添加 SQL 条件或排序` : column.name,
+    })
+    if (options.headerContextMenu) header.addEventListener('contextmenu', (event) => options.headerContextMenu(event, column, columnIndex))
+    return header
+  })))
   const body = element('tbody')
   rows.forEach((row, rowIndex) => {
     const values = Array.isArray(row) ? row : columns.map((column) => row[column.name])
@@ -676,9 +793,83 @@ function currentResult() {
   return activeQueryTab()?.results?.[state.resultTab] || null
 }
 
+function formatQueryTime(value) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const pad = (part) => String(part).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function formatQueryDuration(value) {
+  const duration = Number(value)
+  if (!Number.isFinite(duration)) return ''
+  if (duration < 1000) return `${Math.max(0, Math.round(duration))} ms`
+  const seconds = (duration / 1000).toFixed(duration < 10000 ? 2 : 1).replace(/\.?0+$/, '')
+  return `${seconds} s`
+}
+
+function formatResultCount(value) {
+  if (value === null || value === undefined || value === '') return ''
+  try {
+    return new Intl.NumberFormat('zh-CN').format(typeof value === 'string' ? BigInt(value) : value)
+  } catch {
+    return String(value)
+  }
+}
+
+function renderResultQueryMeta(result) {
+  const queryTime = formatQueryTime(result?.queriedAt)
+  const duration = formatQueryDuration(result?.durationMs)
+  const parts = []
+  if (queryTime) parts.push(`查询时间 ${queryTime}`)
+  if (duration) parts.push(`耗时 ${duration}`)
+  refs.resultQueryMeta.textContent = parts.join(' · ')
+  refs.resultQueryMeta.hidden = state.resultTab !== 'result' || !parts.length
+}
+
+function canSaveActiveQuery() {
+  const tab = activeQueryTab()
+  const result = tab?.results?.result
+  return state.resultTab === 'result'
+    && Boolean(result?.queriedAt)
+    && result.sourceSql === tab.sql
+}
+
+function renderScriptResults(result) {
+  const container = element('div', { className: 'script-results' })
+  const resultSets = Array.isArray(result.resultSets) ? result.resultSets : []
+  resultSets.forEach((resultSet, index) => {
+    const returnedCount = resultSet.rows?.length || 0
+    const totalCount = formatResultCount(resultSet.totalCount)
+    const summary = totalCount
+      ? `返回 ${formatResultCount(returnedCount)} 行 · 符合条件 ${totalCount} 条`
+      : `${formatResultCount(returnedCount)} 行`
+    const section = element('section', { className: 'script-result' }, [
+      element('div', { className: 'script-result-header' }, [
+        element('strong', { text: `结果 ${index + 1}` }),
+        element('span', { className: 'counter', text: String(resultSet.statementKind || 'query').toUpperCase() }),
+        element('span', { className: 'script-result-summary', text: `${summary} · ${formatQueryDuration(resultSet.durationMs)}` }),
+      ]),
+    ])
+    if (resultSet.columns?.length) {
+      section.append(renderDataTable(resultSet.columns, resultSet.rows || [], {
+        contextKey: `script-${index}`,
+        headerContextMenu: (event, column, columnIndex) => openResultColumnMenu(event, resultSet, column, columnIndex),
+        contextMenu: (event, row, rowIndex) => openResultRowMenu(event, resultSet, row, rowIndex, true),
+      }))
+    } else {
+      section.append(emptyState('执行完成', '当前语句没有返回结果集'))
+    }
+    container.append(section)
+  })
+  return container
+}
+
 function renderResult() {
   refs.resultBody.replaceChildren()
+  refs.saveQuery.hidden = !canSaveActiveQuery()
   if (state.resultTab === 'audit') {
+    renderResultQueryMeta(null)
     const columns = ['time', 'operation', 'status', 'duration', 'rows', 'sql']
     const rows = state.audit.map((entry) => [
       entry.time, entry.operation, entry.status, `${entry.durationMs || 0}ms`, entry.rowCount ?? '—', entry.sqlPreview || entry.sqlHash || '',
@@ -689,18 +880,21 @@ function renderResult() {
     }) : emptyState('暂无审计记录', '执行 SQL 后会记录脱敏摘要'))
     refs.resultCount.textContent = `${rows.length} 条`
     refs.exportCsv.disabled = true
-    refs.exportText.disabled = true
+    refs.copyTable.disabled = true
     return
   }
   const result = currentResult()
+  renderResultQueryMeta(result)
   if (!result) {
     refs.resultBody.append(emptyState(state.resultTab === 'explain' ? '暂无执行计划' : '暂无查询结果', '运行 SQL 后结果会显示在这里'))
     refs.resultCount.textContent = '0 行'
     refs.exportCsv.disabled = true
-    refs.exportText.disabled = true
+    refs.copyTable.disabled = true
     return
   }
-  if (result.statementKind && !result.columns?.length) {
+  if (result.script && result.resultSets?.length) {
+    refs.resultBody.append(renderScriptResults(result))
+  } else if (result.statementKind && !result.columns?.length) {
     const card = element('div', { className: 'statement-result' }, [
       element('strong', { text: `${String(result.statementKind).toUpperCase()} 执行成功` }),
       element('div', { className: 'statement-meta' }, [
@@ -712,14 +906,23 @@ function renderResult() {
   } else if (result.columns?.length) {
     refs.resultBody.append(renderDataTable(result.columns, result.rows || [], {
       contextKey: state.resultTab,
+      headerContextMenu: state.resultTab === 'result'
+        ? (event, column, columnIndex) => openResultColumnMenu(event, result, column, columnIndex)
+        : null,
       contextMenu: (event, row, rowIndex) => openResultRowMenu(event, result, row, rowIndex, state.resultTab === 'result'),
     }))
   } else {
     refs.resultBody.append(emptyState('执行完成', '当前语句没有返回结果集'))
   }
-  refs.resultCount.textContent = `${result.rows?.length || result.affectedRows || 0} 行`
+  const returnedCount = result.rows?.length || result.affectedRows || 0
+  const totalCount = formatResultCount(result.totalCount)
+  refs.resultCount.textContent = result.script
+    ? `${result.resultSets?.length || 0} 个结果集 · ${formatResultCount((result.resultSets || []).reduce((sum, item) => sum + (item.rows?.length || 0), 0))} 行`
+    : result.columns?.length && totalCount
+    ? `返回 ${formatResultCount(returnedCount)} 行 · 符合条件 ${totalCount} 条`
+    : `${formatResultCount(returnedCount)} 行`
   refs.exportCsv.disabled = !result.columns?.length
-  refs.exportText.disabled = !result.columns?.length
+  refs.copyTable.disabled = !result.columns?.length
 }
 
 function renderStatus() {
@@ -865,7 +1068,9 @@ async function chooseTable(table) {
   const cached = state.schemaCache[table.name]
   state.detail = cached?.table?.name === table.name ? cached : null
   state.detailLoading = !state.detail
-  renderTables()
+  for (const row of refs.tableList.querySelectorAll('.table-row')) {
+    row.classList.toggle('active', row.dataset.tableName === table.name)
+  }
   renderInspector()
   if (state.detail) return state.detail
   try {
@@ -886,7 +1091,7 @@ async function chooseTable(table) {
 }
 
 function fillTableQuery(table, run = false) {
-  const sql = `SELECT * FROM \`${table.name.replace(/`/g, '``')}\` LIMIT 100`
+  const sql = `SELECT * FROM \`${table.name.replace(/`/g, '``')}\` LIMIT 20`
   let tab = state.queryTabs.find((item) => item.tableName === table.name)
   if (!tab) {
     tab = createQueryTab({ title: table.name, tableName: table.name, sql })
@@ -937,11 +1142,14 @@ function sqlRoot(sql) {
 async function executeQuery(method) {
   const requestTarget = target()
   const tab = activeQueryTab()
-  const sql = tab?.sql?.trim()
-  if (!requestTarget || !sql || state.busy) return
+  const sourceSql = tab?.sql || ''
+  const sql = stripSqlComments(sourceSql).trim()
+  if (!requestTarget || state.busy) return
+  if (!sql) return notify(sourceSql.trim() ? 'SQL 注释已过滤，没有可执行语句' : '请输入要执行的 SQL', true)
   const mutating = method === METHODS.QUERY && MUTATING_ROOTS.has(sqlRoot(sql))
   if (mutating && !window.confirm(`确认执行 ${sqlRoot(sql).toUpperCase()} 写操作？\n\n${activeConnection().label} / ${state.database}\n\n${sql.slice(0, 600)}`)) return
   if (mutating && activeConnection().environment === 'production' && !window.confirm(`再次确认在生产库执行写操作？\n\n${sql.slice(0, 600)}`)) return
+  const queriedAt = new Date().toISOString()
   setBusy(true)
   try {
     const value = await rpc(method, {
@@ -951,18 +1159,207 @@ async function executeQuery(method) {
       limit: activeConnection().environment === 'production' ? 100 : activeConnection().maxRows,
     })
     const resultKey = method === METHODS.EXPLAIN ? 'explain' : 'result'
-    tab.results[resultKey] = value
+    tab.results[resultKey] = { ...value, queriedAt, sourceSql }
     state.resultTab = resultKey
     const audit = await rpc(METHODS.AUDIT, { connectionId: requestTarget.connectionId, database: requestTarget.database, limit: 80 })
     state.audit = audit.entries || []
     persistContext()
-    notify(`${method === METHODS.EXPLAIN ? 'EXPLAIN' : 'SQL'} 执行完成 · ${value.durationMs || 0}ms`)
+    notify(value.script
+      ? `只读脚本执行完成 · ${value.statementCount} 条语句 · ${value.resultSets?.length || 0} 个结果集 · ${value.durationMs || 0}ms`
+      : `${method === METHODS.EXPLAIN ? 'EXPLAIN' : 'SQL'} 执行完成 · ${value.durationMs || 0}ms`)
   } catch (error) {
     notify(error.message, true)
   } finally {
     setBusy(false)
     renderResultTabs()
   }
+}
+
+function beautifySql() {
+  const tab = activeQueryTab()
+  if (!tab) return
+  const start = refs.sqlEditor.selectionStart
+  const end = refs.sqlEditor.selectionEnd
+  const selected = end > start
+  const source = selected ? refs.sqlEditor.value.slice(start, end) : refs.sqlEditor.value
+  const formatted = formatSql(source)
+  if (!formatted) return notify('没有可美化的 SQL', true)
+  if (selected) {
+    refs.sqlEditor.setRangeText(formatted, start, end, 'select')
+  } else {
+    refs.sqlEditor.value = formatted
+    refs.sqlEditor.setSelectionRange(formatted.length, formatted.length)
+  }
+  refs.sqlEditor.dispatchEvent(new Event('input', { bubbles: true }))
+  refs.sqlEditor.focus()
+  notify(selected ? '已美化选中的 SQL' : 'SQL 已美化')
+}
+
+function defaultSavedQueryName(tab) {
+  if (tab?.tableName) return `${tab.tableName} 查询`
+  if (tab?.title && !/^查询\s+\d+$/.test(tab.title)) return tab.title
+  const now = new Date()
+  const pad = (value) => String(value).padStart(2, '0')
+  return `查询 ${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`
+}
+
+function openSaveQueryModal() {
+  const tab = activeQueryTab()
+  const result = tab?.results?.result
+  if (!canSaveActiveQuery() || !result?.sourceSql) return notify('请先成功运行当前 SQL', true)
+  refs.modalRoot.innerHTML = `
+    <div class="modal-backdrop">
+      <section class="modal" role="dialog" aria-modal="true" aria-label="保存查询">
+        <div class="modal-header"><strong>保存本次查询</strong><button class="icon-button" type="button" data-close>×</button></div>
+        <form>
+          <div class="modal-body">
+            <label class="field wide"><span>查询名称</span><input name="queryName" maxlength="80" required autocomplete="off"></label>
+            <div class="field wide"><span>SQL 预览</span><pre class="saved-query-modal-sql"></pre></div>
+          </div>
+          <div class="modal-footer">
+            <span class="field-hint">${activeConnection().label} / ${state.database}</span>
+            <div class="button-row"><button class="button ghost" type="button" data-close>取消</button><button class="button primary" type="submit">保存</button></div>
+          </div>
+        </form>
+      </section>
+    </div>`
+  const backdrop = refs.modalRoot.querySelector('.modal-backdrop')
+  const form = refs.modalRoot.querySelector('form')
+  const input = form.elements.queryName
+  input.value = defaultSavedQueryName(tab)
+  refs.modalRoot.querySelector('.saved-query-modal-sql').textContent = result.sourceSql
+  for (const button of refs.modalRoot.querySelectorAll('[data-close]')) {
+    button.addEventListener('click', () => refs.modalRoot.replaceChildren())
+  }
+  backdrop.addEventListener('pointerdown', (event) => {
+    if (event.target === backdrop) refs.modalRoot.replaceChildren()
+  })
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault()
+    const name = input.value.trim()
+    if (!name) return
+    persisted.savedQueries.unshift({
+      id: crypto.randomUUID(),
+      name,
+      connectionId: state.connectionId,
+      database: state.database,
+      sql: result.sourceSql,
+      createdAt: new Date().toISOString(),
+    })
+    persisted.savedQueries = persisted.savedQueries.slice(0, 200)
+    await savePersisted()
+    refs.modalRoot.replaceChildren()
+    renderQueryTabs()
+    notify(`已保存查询 · ${name}`)
+  })
+  input.focus()
+  input.select()
+}
+
+function closeSavedQueryDrawer() {
+  refs.savedQueryDrawerRoot.replaceChildren()
+}
+
+function runSavedQuery(query) {
+  let tab = activeQueryTab()
+  const reusable = tab
+    && tab.sql.trim() === 'SELECT * FROM'
+    && !tab.results.result
+    && !tab.results.explain
+  if (!reusable) {
+    if (state.queryTabs.length >= 20) return notify('最多同时打开 20 个查询页签', true)
+    tab = createQueryTab({ title: query.name, sql: query.sql })
+    state.queryTabs.push(tab)
+  } else {
+    tab.title = query.name
+    tab.sql = query.sql
+    tab.tableName = ''
+    tab.results = { result: null, explain: null }
+  }
+  state.activeQueryId = tab.id
+  state.resultTab = 'result'
+  persistContext()
+  closeSavedQueryDrawer()
+  renderQueryTabs()
+  renderResultTabs()
+  refs.sqlEditor.focus()
+  executeQuery(METHODS.QUERY)
+}
+
+function openSavedQueryDrawer() {
+  const queries = savedQueriesForScope()
+  const backdrop = element('div', { className: 'saved-query-drawer-backdrop' })
+  const drawer = element('aside', { className: 'saved-query-drawer', attributes: { 'aria-label': '已保存查询' } })
+  const close = element('button', { className: 'icon-button', type: 'button', text: '×', title: '关闭已保存查询' })
+  const summary = element('span')
+  const header = element('div', { className: 'saved-query-drawer-header' }, [
+    element('div', {}, [
+      element('strong', { text: '已保存查询' }),
+      summary,
+    ]),
+    close,
+  ])
+  const search = element('input', {
+    type: 'search',
+    attributes: {
+      placeholder: '按查询名称模糊搜索',
+      autocomplete: 'off',
+      'aria-label': '搜索已保存查询',
+    },
+  })
+  const searchWrap = element('label', { className: 'search-wrap saved-query-search' }, [
+    element('span', { text: '⌕', attributes: { 'aria-hidden': 'true' } }),
+    search,
+  ])
+  const list = element('div', { className: 'saved-query-list' })
+  const renderList = () => {
+    const keyword = search.value.trim()
+    const matched = queries
+      .map((query, index) => ({ query, index, score: fuzzyTextScore(query.name, keyword) }))
+      .filter((item) => Number.isFinite(item.score))
+      .sort((left, right) =>
+        left.score - right.score
+        || String(left.query.name).length - String(right.query.name).length
+        || left.index - right.index)
+      .map((item) => item.query)
+    summary.textContent = keyword
+      ? `${activeConnection()?.label || ''} / ${state.database} · 匹配 ${matched.length}/${queries.length} 条`
+      : `${activeConnection()?.label || ''} / ${state.database} · ${queries.length} 条`
+    list.replaceChildren()
+    if (!matched.length) {
+      list.append(emptyState(
+        queries.length ? '没有匹配的查询' : '暂无已保存查询',
+        queries.length ? '尝试输入其他查询名称' : '成功运行 SQL 后，点击“保存查询”添加',
+      ))
+      return
+    }
+    for (const query of matched) {
+      const item = element('button', {
+        className: 'saved-query-item',
+        type: 'button',
+        title: `载入并运行 ${query.name}`,
+      }, [
+        element('div', { className: 'saved-query-item-header' }, [
+          element('span', { className: 'saved-query-item-name', text: query.name }),
+          element('span', { className: 'saved-query-item-time', text: formatQueryTime(query.createdAt) }),
+        ]),
+        element('code', { className: 'saved-query-item-sql', text: query.sql }),
+        element('span', { className: 'saved-query-item-action', text: '点击查看并运行 →' }),
+      ])
+      item.addEventListener('click', () => runSavedQuery(query))
+      list.append(item)
+    }
+  }
+  search.addEventListener('input', renderList)
+  close.addEventListener('click', closeSavedQueryDrawer)
+  backdrop.addEventListener('pointerdown', (event) => {
+    if (event.target === backdrop) closeSavedQueryDrawer()
+  })
+  drawer.append(header, searchWrap, list)
+  backdrop.append(drawer)
+  refs.savedQueryDrawerRoot.replaceChildren(backdrop)
+  renderList()
+  search.focus()
 }
 
 async function copyText(text, message) {
@@ -982,6 +1379,133 @@ async function copyText(text, message) {
   }
   closeContextMenu()
   notify(message)
+}
+
+function applyColumnCommand(column, operation) {
+  const tab = activeQueryTab()
+  if (!tab) return
+  const tableName = activeQueryTab()?.tableName || state.selectedTable
+  const baseSql = tab.sql.trim() && tab.sql.trim() !== 'SELECT * FROM'
+    ? tab.sql
+    : tableName ? `SELECT * FROM ${quoteSqlIdentifier(tableName)} LIMIT 20` : tab.sql
+  const change = applyColumnOperation(baseSql, column.originalName || column.name, operation)
+  tab.sql = change.sql
+  persistContext()
+  closeContextMenu()
+  renderQueryTabs()
+  window.requestAnimationFrame(() => {
+    refs.sqlEditor.focus()
+    refs.sqlEditor.setSelectionRange(change.selectionStart, change.selectionEnd)
+  })
+  notify(`已写入字段条件 · ${column.name}`)
+}
+
+function openResultColumnMenu(event, result, column, columnIndex) {
+  event.preventDefault()
+  event.stopPropagation()
+  state.contextColumn = { key: state.resultTab, columnIndex }
+  state.contextRow = null
+  state.contextTable = ''
+  renderResult()
+
+  const tableName = column.originalTable || column.table || activeQueryTab()?.tableName || state.selectedTable
+  const detail = state.schemaCache[tableName] || (state.detail?.table?.name === tableName ? state.detail : null)
+  const sampleValue = (result.rows || []).find((row) => row[columnIndex] !== null && row[columnIndex] !== undefined)?.[columnIndex]
+  const type = classifyColumnType(column, detail, sampleValue)
+  const typeLabels = { datetime: '时间字段', number: '数值字段', longtext: '长文本字段', text: '文本字段', unknown: '通用字段' }
+  const menu = element('div', { className: 'context-menu column-context-menu', attributes: { role: 'menu' } })
+  const menuButton = (label, icon, operation, options = {}) => {
+    const button = element('button', {
+      type: 'button',
+      attributes: { role: 'menuitem' },
+    }, [
+      element('span', { className: 'menu-icon', text: icon }),
+      element('span', { text: label }),
+    ])
+    button.addEventListener('click', () => operation ? applyColumnCommand(column, operation) : copyText(quoteSqlIdentifier(column.originalName || column.name), '已复制字段名'))
+    if (options.title) button.title = options.title
+    return button
+  }
+
+  menu.append(
+    element('div', { className: 'menu-label', text: `${typeLabels[type]} · ${column.name}` }),
+    menuButton('复制字段名', '⧉', null),
+    menuButton('ORDER BY 字段 DESC', '↓', 'order-desc'),
+    menuButton('ORDER BY 字段 ASC', '↑', 'order-asc'),
+    element('div', { className: 'menu-separator' }),
+  )
+
+  if (type === 'datetime') {
+    menu.append(
+      menuButton('WHERE 字段 >= 时间', '≥', 'date-after'),
+      menuButton('WHERE 字段 <= 时间', '≤', 'date-before'),
+      menuButton('WHERE 时间范围 BETWEEN', '↔', 'date-between'),
+    )
+  } else if (type === 'number') {
+    menu.append(
+      menuButton('WHERE 字段 = 数值', '=', 'number-eq'),
+      menuButton('WHERE 字段 > 数值', '>', 'number-gt'),
+      menuButton('WHERE 字段 < 数值', '<', 'number-lt'),
+      menuButton('WHERE 字段 >= 数值', '≥', 'number-gte'),
+      menuButton('WHERE 字段 <= 数值', '≤', 'number-lte'),
+      menuButton('WHERE 数值范围 BETWEEN', '↔', 'number-between'),
+      menuButton('WHERE 字段 IN (...)', '∈', 'number-in'),
+    )
+  } else if (type === 'longtext') {
+    menu.append(
+      menuButton("WHERE 字段 LIKE '%关键词%'", '≈', 'text-like'),
+      menuButton("WHERE 字段 LIKE '前缀%'", '↦', 'text-prefix'),
+    )
+  } else {
+    menu.append(
+      menuButton("WHERE 字段 = '值'", '=', 'text-eq'),
+      menuButton("WHERE 字段 LIKE '%关键词%'", '≈', 'text-like'),
+      menuButton("WHERE 字段 LIKE '前缀%'", '↦', 'text-prefix'),
+      menuButton("WHERE 字段 IN ('值1', '值2')", '∈', 'text-in'),
+    )
+  }
+
+  menu.append(
+    element('div', { className: 'menu-separator' }),
+    menuButton('WHERE 字段 IS NULL', '∅', 'is-null'),
+    menuButton('WHERE 字段 IS NOT NULL', '!', 'is-not-null'),
+    element('div', { className: 'menu-footer', text: `${column.name} · ${String(detail?.columns?.find((item) => item.name === (column.originalName || column.name))?.type || column.type || type)}` }),
+  )
+  refs.contextMenuRoot.replaceChildren(menu)
+  const width = 258
+  const itemCount = menu.querySelectorAll('button').length
+  const height = 58 + itemCount * 31
+  const gap = 8
+  menu.style.width = `${width}px`
+  menu.style.left = `${Math.max(gap, Math.min(event.clientX, window.innerWidth - width - gap))}px`
+  menu.style.top = `${Math.max(gap, Math.min(event.clientY, window.innerHeight - height - gap))}px`
+}
+
+async function writeTableClipboard(value, message) {
+  try {
+    if (!navigator.clipboard?.write || typeof ClipboardItem === 'undefined') throw new Error('rich clipboard unavailable')
+    await navigator.clipboard.write([new ClipboardItem({
+      'text/plain': new Blob([value.text], { type: 'text/plain' }),
+      'text/html': new Blob([value.html], { type: 'text/html' }),
+    })])
+    closeContextMenu()
+    notify(message)
+  } catch {
+    await copyText(value.text, message)
+  }
+}
+
+async function copyRowTable(columns, row) {
+  await writeTableClipboard(rowTableClipboard(columns, row), '已复制此行表格（字段行 + 数据行）')
+}
+
+async function copyResultTable() {
+  const result = currentResult()
+  if (!result?.columns?.length) return notify('当前没有可复制的表格结果', true)
+  await writeTableClipboard(
+    tableClipboard(result.columns, result.rows || []),
+    `已复制表格 · ${result.rows?.length || 0} 行`,
+  )
 }
 
 function rowRecord(columns, row) {
@@ -1021,7 +1545,10 @@ function openResultRowMenu(event, result, row, rowIndex, allowSqlActions) {
     return button
   }
 
-  menu.append(menuButton('复制此行 JSON', '⧉', () => copyText(JSON.stringify(rowRecord(result.columns, row), null, 2), '已复制整行 JSON')))
+  menu.append(
+    menuButton('复制此行表格', '▦', () => copyRowTable(result.columns, row)),
+    menuButton('复制此行 JSON', '⧉', () => copyText(JSON.stringify(rowRecord(result.columns, row), null, 2), '已复制整行 JSON')),
+  )
   if (allowSqlActions) {
     menu.append(element('div', { className: 'menu-separator' }))
     menu.append(
@@ -1033,7 +1560,7 @@ function openResultRowMenu(event, result, row, rowIndex, allowSqlActions) {
   menu.append(element('div', { className: 'menu-footer', text: `第 ${rowIndex + 1} 行 · ${result.columns.length} 列${sqlContext ? ` · ${sqlContext.targetTable}` : ''}` }))
   refs.contextMenuRoot.replaceChildren(menu)
   const width = 224
-  const height = allowSqlActions ? 180 : 78
+  const height = allowSqlActions ? 212 : 110
   const gap = 8
   menu.style.left = `${Math.max(gap, Math.min(event.clientX, window.innerWidth - width - gap))}px`
   menu.style.top = `${Math.max(gap, Math.min(event.clientY, window.innerHeight - height - gap))}px`
@@ -1056,12 +1583,17 @@ function updateTablePreference(tableName, patch) {
 }
 
 function closeContextMenu() {
+  const hadTableContext = Boolean(state.contextTable)
   const hadRowContext = Boolean(state.contextRow)
+  const hadColumnContext = Boolean(state.contextColumn)
+  const hadMenu = refs.contextMenuRoot.childElementCount > 0
+  if (!hadTableContext && !hadRowContext && !hadColumnContext && !hadMenu) return
   state.contextTable = ''
   state.contextRow = null
+  state.contextColumn = null
   refs.contextMenuRoot.replaceChildren()
-  renderTables()
-  if (hadRowContext) renderResult()
+  if (hadTableContext) renderTables()
+  if (hadRowContext || hadColumnContext) renderResult()
 }
 
 function openTableMenu(event, table) {
@@ -1071,6 +1603,14 @@ function openTableMenu(event, table) {
   renderTables()
   const preference = tablePreferences()[table.name] || {}
   const menu = element('div', { className: 'context-menu', attributes: { role: 'menu' } })
+  const selectButton = element('button', { type: 'button', attributes: { role: 'menuitem' } }, [
+    element('span', { className: 'menu-icon', text: '✓' }),
+    element('span', { text: '选择此表' }),
+  ])
+  selectButton.addEventListener('click', () => {
+    closeContextMenu()
+    chooseTable(table)
+  })
   const positionButton = (position, icon, label) => {
     const button = element('button', { type: 'button' }, [
       element('span', { className: 'menu-icon', text: icon }),
@@ -1079,7 +1619,7 @@ function openTableMenu(event, table) {
     button.addEventListener('click', () => updateTablePreference(table.name, { position: preference.position === position ? '' : position }))
     return button
   }
-  menu.append(positionButton('top', '↑', '置顶'), positionButton('bottom', '↓', '下沉'))
+  menu.append(selectButton, element('div', { className: 'menu-separator' }), positionButton('top', '↑', '置顶'), positionButton('bottom', '↓', '下沉'))
   menu.append(element('div', { className: 'menu-separator' }), element('div', { className: 'menu-label', text: '表名颜色' }))
   const colors = element('div', { className: 'color-grid' })
   for (const color of TABLE_COLORS) {
@@ -1112,7 +1652,7 @@ function openTableMenu(event, table) {
   menu.append(element('div', { className: 'menu-footer', text: `当前表 · ${table.name}` }))
   refs.contextMenuRoot.replaceChildren(menu)
   const width = 224
-  const height = preference.color ? 230 : 200
+  const height = preference.color ? 267 : 237
   const gap = 8
   menu.style.left = `${Math.max(gap, Math.min(event.clientX, window.innerWidth - width - gap))}px`
   menu.style.top = `${Math.max(gap, Math.min(event.clientY, window.innerHeight - height - gap))}px`
@@ -1235,36 +1775,24 @@ function openConnectionModal(connection = null) {
   form.elements.label.focus()
 }
 
-function exportRows(kind) {
+function exportCsv() {
   const result = currentResult()
   if (!result?.columns?.length) return notify('当前没有可导出的结果', true)
   const clean = (value) => value === null || value === undefined ? '' : typeof value === 'object' ? JSON.stringify(value) : String(value)
-  let content
-  let extension
-  let mime
-  if (kind === 'csv') {
-    const cell = (value) => {
-      let text = clean(value)
-      if (/^[=+\-@]/.test(text)) text = `\t${text}`
-      return `"${text.replace(/"/g, '""')}"`
-    }
-    content = `\uFEFF${[result.columns.map((column) => cell(column.name)).join(','), ...(result.rows || []).map((row) => row.map(cell).join(','))].join('\r\n')}`
-    extension = 'csv'
-    mime = 'text/csv;charset=utf-8'
-  } else {
-    content = `\uFEFF${[result.columns.map((column) => column.name).join('\t'), ...(result.rows || []).map((row) => row.map((value) => clean(value).replace(/\t/g, '\\t').replace(/\r?\n/g, '\\n')).join('\t'))].join('\n')}`
-    extension = 'txt'
-    mime = 'text/plain;charset=utf-8'
-    navigator.clipboard?.writeText(content.replace(/^\uFEFF/, '')).catch(() => {})
+  const cell = (value) => {
+    let text = clean(value)
+    if (/^[=+\-@]/.test(text)) text = `\t${text}`
+    return `"${text.replace(/"/g, '""')}"`
   }
-  const blob = new Blob([content], { type: mime })
+  const content = `\uFEFF${[result.columns.map((column) => cell(column.name)).join(','), ...(result.rows || []).map((row) => row.map(cell).join(','))].join('\r\n')}`
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
   link.href = url
-  link.download = `${state.database || 'mysql'}-${activeQueryTab()?.tableName || 'query'}-${new Date().toISOString().replace(/[:.]/g, '-')}.${extension}`
+  link.download = `${state.database || 'mysql'}-${activeQueryTab()?.tableName || 'query'}-${new Date().toISOString().replace(/[:.]/g, '-')}.csv`
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
-  notify(kind === 'csv' ? 'CSV 已导出' : '文本已导出并尝试复制')
+  notify('CSV 已导出')
 }
 
 function bindEvents() {
@@ -1302,12 +1830,14 @@ function bindEvents() {
     const tab = activeQueryTab()
     if (!tab) return
     tab.sql = refs.sqlEditor.value
-    refs.editorLines.textContent = String(tab.sql.split('\n').length)
+    updateEditorPresentation()
     persistContext()
     prefetchSqlSchemas(tab.sql)
     state.completionIndex = 0
     updateSqlCompletion()
+    refs.saveQuery.hidden = !canSaveActiveQuery()
   })
+  refs.sqlEditor.addEventListener('scroll', syncEditorScroll)
   refs.sqlEditor.addEventListener('keydown', (event) => {
     if ((event.metaKey || event.ctrlKey) && event.code === 'Space') {
       event.preventDefault()
@@ -1356,7 +1886,10 @@ function bindEvents() {
   })
   refs.sqlEditor.addEventListener('blur', () => window.setTimeout(() => closeSqlCompletion(), 120))
   refs.runQuery.addEventListener('click', () => executeQuery(METHODS.QUERY))
+  refs.formatSql.addEventListener('click', beautifySql)
   refs.runExplain.addEventListener('click', () => executeQuery(METHODS.EXPLAIN))
+  refs.saveQuery.addEventListener('click', openSaveQueryModal)
+  refs.openSavedQueries.addEventListener('click', openSavedQueryDrawer)
   refs.resultTabs.addEventListener('click', (event) => {
     const button = event.target.closest('[data-result-tab]')
     if (!button) return
@@ -1364,8 +1897,8 @@ function bindEvents() {
     persistContext()
     renderResultTabs()
   })
-  refs.exportCsv.addEventListener('click', () => exportRows('csv'))
-  refs.exportText.addEventListener('click', () => exportRows('text'))
+  refs.exportCsv.addEventListener('click', exportCsv)
+  refs.copyTable.addEventListener('click', copyResultTable)
   window.addEventListener('pointerdown', (event) => {
     if (!event.target.closest('.context-menu')) closeContextMenu()
     if (!event.target.closest('.sql-completion') && event.target !== refs.sqlEditor) closeSqlCompletion()
@@ -1374,6 +1907,7 @@ function bindEvents() {
     if (event.key === 'Escape') {
       closeContextMenu()
       refs.modalRoot.replaceChildren()
+      closeSavedQueryDrawer()
     }
   })
   window.addEventListener('resize', closeContextMenu)
@@ -1392,6 +1926,9 @@ async function initialize() {
     const ping = await rpc(METHODS.PING)
     state.nativeReady = true
     refs.statusDetail.textContent = `HOST ${ping.version}`
+    await loadNativePersisted()
+    renderTheme()
+    renderLayout()
     await loadConnections()
   } catch (error) {
     state.nativeReady = false

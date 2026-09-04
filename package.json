@@ -1,6 +1,6 @@
 {
   "name": "mysql-browser-client",
-  "version": "0.2.0",
+  "version": "0.2.7",
   "description": "A local-first MySQL workbench for Chromium browsers",
   "type": "module",
   "private": true,
@@ -8,7 +8,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "check": "node --check extension/background.js && node --check extension/protocol.js && node --check extension/sql-utils.js && node --check extension/app.js && node --check shared/protocol.js && node --check native/host.js && node --check native/service.js && node --check native/store.js && node --check native/credential-store.js && node --check native/message-stream.js && node --check native/policy.js && node --check scripts/install-native-host.js && node --check scripts/package-extension.js",
+    "check": "node --check extension/background.js && node --check extension/protocol.js && node --check extension/sql-utils.js && node --check extension/app.js && node --check shared/protocol.js && node --check native/host.js && node --check native/service.js && node --check native/store.js && node --check native/workspace-store.js && node --check native/credential-store.js && node --check native/message-stream.js && node --check native/policy.js && node --check scripts/install-native-host.js && node --check scripts/package-extension.js",
     "test": "node --test",
     "native:install": "node scripts/install-native-host.js",
     "package": "node scripts/package-extension.js"

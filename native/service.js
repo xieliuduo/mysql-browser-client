@@ -5,9 +5,10 @@ import { join } from 'node:path'
 import mysql from 'mysql2/promise'
 import { METHODS } from '../shared/protocol.js'
 import { CredentialStore } from './credential-store.js'
-import { redactSql, SqlPolicyError, validateExplainTarget, validateSql } from './policy.js'
+import { buildCountSql, redactSql, splitSqlStatements, SqlPolicyError, validateExplainTarget, validateReadOnlyScript, validateSql } from './policy.js'
 import { ConnectionStore, ConnectionStoreError, normalizeConnection, publicConnection } from './store.js'
 import { tableSummary } from './table-summary.js'
+import { WorkspaceStore, WorkspaceStoreError } from './workspace-store.js'
 
 const DEFAULT_AUDIT_LIMIT = 200
 const PRODUCTION_MAX_ROWS = 100
@@ -33,7 +34,7 @@ function jsonValue(value) {
 }
 
 function safeError(error) {
-  if (error instanceof SqlPolicyError || error instanceof ConnectionStoreError) {
+  if (error instanceof SqlPolicyError || error instanceof ConnectionStoreError || error instanceof WorkspaceStoreError) {
     return { code: error.code || 'bad-request', message: error.message }
   }
   const sourceCode = typeof error?.code === 'string' ? error.code : 'REQUEST_FAILED'
@@ -97,6 +98,8 @@ export class MysqlBrowserService {
     const home = options.home || process.env.MYSQL_BROWSER_CLIENT_HOME || join(homedir(), '.mysql-browser-client')
     this.store = options.store || new ConnectionStore(join(home, 'connections.json'))
     this.credentials = options.credentials || new CredentialStore(join(home, 'credentials.json'))
+    this.workspace = options.workspace || new WorkspaceStore(join(home, 'workspace.json'))
+    this.createMysqlConnection = options.createMysqlConnection || mysql.createConnection
     this.auditLimit = asInteger(options.auditLimit, DEFAULT_AUDIT_LIMIT, 10, 1000)
     this.audit = []
   }
@@ -143,7 +146,7 @@ export class MysqlBrowserService {
   async withConnection(connection, database, operation, passwordOverride) {
     const limits = this.connectionLimits(connection)
     const password = passwordOverride ?? await this.resolvePassword(connection)
-    const client = await mysql.createConnection({
+    const client = await this.createMysqlConnection({
       host: connection.host,
       port: connection.port,
       user: connection.user,
@@ -159,7 +162,6 @@ export class MysqlBrowserService {
     })
     try {
       await client.query(`SET SESSION MAX_EXECUTION_TIME = ${limits.timeoutMs}`)
-      await client.query(`SET SESSION sql_select_limit = ${limits.maxRows}`)
       return await operation(client, limits)
     } finally {
       await client.end().catch(() => {})
@@ -214,7 +216,7 @@ export class MysqlBrowserService {
           WHERE s.TABLE_SCHEMA=t.TABLE_SCHEMA AND s.TABLE_NAME=t.TABLE_NAME) AS indexCount
         FROM information_schema.TABLES t
         WHERE t.TABLE_SCHEMA=? AND (?='' OR t.TABLE_NAME LIKE CONCAT('%', ?, '%'))
-        ORDER BY t.TABLE_NAME LIMIT 5000`, [target.database, term, term])
+        ORDER BY t.TABLE_NAME`, [target.database, term, term])
       return {
         connectionId,
         database: target.database,
@@ -317,6 +319,13 @@ export class MysqlBrowserService {
             }
           }
           const safeRows = rows.slice(0, rowLimit).map((row) => jsonValue(row))
+          let totalCount = null
+          if (checked.kind === 'select') {
+            try {
+              const [countRows] = await client.query({ sql: buildCountSql(checked.sql, { maxRows: rowLimit }), rowsAsArray: true })
+              totalCount = Array.isArray(countRows) && countRows.length ? jsonValue(countRows[0]?.[0]) : null
+            } catch {}
+          }
           return {
             columns: Array.isArray(fields) ? fields.map((field) => ({
               name: field.name,
@@ -328,6 +337,7 @@ export class MysqlBrowserService {
             })) : [],
             rows: safeRows,
             rowCount: safeRows.length,
+            totalCount,
             truncated: rows.length >= rowLimit,
             durationMs: Date.now() - started,
             target: targetAudit,
@@ -358,7 +368,119 @@ export class MysqlBrowserService {
     }
   }
 
+  async executeReadOnlyScript(sql, targetInput, { limit } = {}) {
+    const target = await this.resolveTarget(targetInput)
+    const limits = this.connectionLimits(target.connection)
+    const rowLimit = asInteger(limit, limits.maxRows, 1, limits.maxRows)
+    const started = Date.now()
+    const rawSql = typeof sql === 'string' ? sql : ''
+    const targetAudit = { connectionId: target.connection.id, database: target.database, environment: target.connection.environment }
+    let checked
+    try {
+      checked = validateReadOnlyScript(rawSql, { maxRows: rowLimit })
+    } catch (error) {
+      this.recordAudit({
+        ...targetAudit,
+        operation: 'script',
+        kind: 'denied',
+        sqlHash: createHash('sha256').update(rawSql).digest('hex').slice(0, 16),
+        sqlPreview: redactSql(rawSql),
+        status: 'denied',
+        durationMs: Date.now() - started,
+        errorCode: safeError(error).code,
+      })
+      throw error
+    }
+    return this.withConnection(target.connection, target.database, async (client) => {
+      await client.query(`SET SESSION sql_select_limit = ${rowLimit}`)
+      await client.query('START TRANSACTION READ ONLY')
+      const resultSets = []
+      try {
+        for (let index = 0; index < checked.statements.length; index += 1) {
+          const statement = checked.statements[index]
+          const statementStarted = Date.now()
+          const auditBase = {
+            ...targetAudit,
+            operation: 'script',
+            kind: statement.kind,
+            statementIndex: index + 1,
+            statementCount: checked.statements.length,
+            sqlHash: createHash('sha256').update(statement.sql).digest('hex').slice(0, 16),
+            sqlPreview: redactSql(statement.sql),
+          }
+          try {
+            if (!statement.visible) {
+              await client.query(statement.sql)
+              this.recordAudit({ ...auditBase, status: 'ok', durationMs: Date.now() - statementStarted, rowCount: 0 })
+              continue
+            }
+            const [rows, fields] = await client.query({ sql: statement.sql, rowsAsArray: true })
+            if (!Array.isArray(rows)) throw new SqlPolicyError('read-only statement did not return a result set')
+            const safeRows = rows.slice(0, rowLimit).map((row) => jsonValue(row))
+            let totalCount = null
+            if (statement.kind === 'select') {
+              try {
+                const countSql = buildCountSql(statement.sql, { maxRows: rowLimit })
+                const [countRows] = await client.query({ sql: countSql, rowsAsArray: true })
+                totalCount = Array.isArray(countRows) && countRows.length ? jsonValue(countRows[0]?.[0]) : null
+              } catch {}
+            }
+            const result = {
+              statementIndex: index + 1,
+              statementKind: statement.kind,
+              sqlPreview: redactSql(statement.sql),
+              columns: Array.isArray(fields) ? fields.map((field) => ({
+                name: field.name,
+                originalName: field.orgName || '',
+                table: field.table || '',
+                originalTable: field.orgTable || field.table || '',
+                schema: field.schema || '',
+                type: field.typeName ?? String(field.columnType ?? ''),
+              })) : [],
+              rows: safeRows,
+              rowCount: safeRows.length,
+              totalCount,
+              truncated: rows.length >= rowLimit,
+              durationMs: Date.now() - statementStarted,
+              target: targetAudit,
+            }
+            resultSets.push(result)
+            this.recordAudit({ ...auditBase, status: 'ok', durationMs: result.durationMs, rowCount: result.rowCount })
+          } catch (error) {
+            const detail = safeError(error)
+            this.recordAudit({
+              ...auditBase,
+              status: 'error',
+              durationMs: Date.now() - statementStarted,
+              errorCode: detail.code,
+            })
+            throw Object.assign(new Error(`第 ${index + 1} 条只读语句执行失败：${detail.message}`), { code: 'SCRIPT_STATEMENT_FAILED' })
+          }
+        }
+        const finalResult = resultSets.at(-1) || { columns: [], rows: [], rowCount: 0, totalCount: null }
+        return {
+          ...finalResult,
+          script: true,
+          statementCount: checked.statements.length,
+          resultSets,
+          durationMs: Date.now() - started,
+        }
+      } finally {
+        await client.query('ROLLBACK').catch(() => {})
+      }
+    })
+  }
+
   query(input = {}) {
+    let statements
+    try {
+      statements = splitSqlStatements(input.sql)
+    } catch {
+      return this.executeReadOnlyScript(input.sql, input, { limit: input.limit })
+    }
+    if (statements.length > 1 || /^\s*set\b/i.test(statements[0])) {
+      return this.executeReadOnlyScript(input.sql, input, { limit: input.limit })
+    }
     return this.executeSql(input.sql, input, { limit: input.limit, operation: 'query' })
   }
 
@@ -424,7 +546,7 @@ export class MysqlBrowserService {
   async handle(method, rawParams = {}) {
     try {
       const params = assertPayload(rawParams)
-      if (method === METHODS.PING) return ok({ status: 'ready', version: '0.2.0', platform: process.platform })
+      if (method === METHODS.PING) return ok({ status: 'ready', version: '0.2.7', platform: process.platform })
       if (method === METHODS.CONNECTIONS) return ok(await this.listConnections())
       if (method === METHODS.CONNECTION_CREATE) return ok(await this.createConnection(params))
       if (method === METHODS.CONNECTION_UPDATE) return ok(await this.updateConnection(params))
@@ -437,6 +559,8 @@ export class MysqlBrowserService {
       if (method === METHODS.QUERY) return ok(await this.query(params))
       if (method === METHODS.EXPLAIN) return ok(await this.explain(params))
       if (method === METHODS.AUDIT) return ok(this.listAudit(params))
+      if (method === METHODS.WORKSPACE_GET) return ok({ workspace: await this.workspace.load() })
+      if (method === METHODS.WORKSPACE_SET) return ok({ workspace: await this.workspace.save(params.workspace) })
       return fail(new ConnectionStoreError(`unknown method: ${method}`, 'UNKNOWN_METHOD'))
     } catch (error) {
       return fail(error)

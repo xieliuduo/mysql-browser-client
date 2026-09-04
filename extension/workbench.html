@@ -12,7 +12,7 @@
         <div class="brand">
           <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
           <div>
-            <div class="brand-kicker">LOCAL DATABASE CONSOLE</div>
+            <div class="brand-kicker">LOCAL DATABASE CONSOLE · V0.2.7</div>
             <h1>MySQL Browser Client</h1>
           </div>
         </div>
@@ -108,7 +108,12 @@
                 <span class="eyebrow">QUERY DESK</span>
                 <strong id="query-target">未选择数据库</strong>
               </div>
-              <span id="query-limit" class="counter">—</span>
+              <div class="query-heading-actions">
+                <button id="open-saved-queries" class="button ghost tiny" type="button">
+                  已保存查询 <span id="saved-query-count">0</span>
+                </button>
+                <span id="query-limit" class="counter">—</span>
+              </div>
             </div>
             <div class="query-tabs-row">
               <div id="query-tabs" class="query-tabs"></div>
@@ -116,11 +121,15 @@
             </div>
             <div id="editor-shell" class="editor-shell">
               <div class="editor-gutter" aria-hidden="true"><span>SQL</span><span id="editor-lines">1</span></div>
-              <textarea id="sql-editor" spellcheck="false" placeholder="SELECT * FROM `table_name` LIMIT 100"></textarea>
+              <div class="editor-input">
+                <pre id="sql-highlight" class="sql-highlight" aria-hidden="true"></pre>
+                <textarea id="sql-editor" wrap="off" spellcheck="false" placeholder="SELECT * FROM `table_name` LIMIT 100"></textarea>
+              </div>
               <div id="sql-completion" class="sql-completion" role="listbox" hidden></div>
               <div class="editor-actions">
                 <div class="button-row">
                   <button id="run-query" class="button primary" type="button">运行查询</button>
+                  <button id="format-sql" class="button ghost" type="button">美化 SQL</button>
                   <button id="run-explain" class="button ghost" type="button">EXPLAIN</button>
                 </div>
                 <span class="shortcut">⌘/Ctrl + Space 补全 · ⌘/Ctrl + Enter 运行</span>
@@ -135,9 +144,11 @@
                   <button class="tab" type="button" data-result-tab="audit">审计</button>
                 </div>
                 <div class="result-actions">
+                  <button id="save-query" class="button ghost tiny" type="button" hidden>保存查询</button>
+                  <span id="result-query-meta" class="result-query-meta" hidden></span>
                   <span id="result-count" class="counter">0 行</span>
                   <button id="export-csv" class="button ghost tiny" type="button">CSV</button>
-                  <button id="export-text" class="button ghost tiny" type="button">文本</button>
+                  <button id="copy-table" class="button ghost tiny" type="button">复制表格</button>
                 </div>
               </div>
               <div id="result-body" class="result-body scroll-region"></div>
@@ -154,6 +165,7 @@
 
     <div id="context-menu-root"></div>
     <div id="modal-root"></div>
+    <div id="saved-query-drawer-root"></div>
     <div id="toast-root" aria-live="polite"></div>
 
     <script type="module" src="app.js"></script>

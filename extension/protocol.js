@@ -14,6 +14,8 @@ export const METHODS = Object.freeze({
   QUERY: 'query',
   EXPLAIN: 'explain',
   AUDIT: 'audit',
+  WORKSPACE_GET: 'workspace-get',
+  WORKSPACE_SET: 'workspace-set',
 })
 
 export function requestMessage(method, params = {}) {
@@ -23,4 +25,3 @@ export function requestMessage(method, params = {}) {
     params,
   }
 }
-

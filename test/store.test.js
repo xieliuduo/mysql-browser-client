@@ -5,6 +5,9 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ConnectionStore, normalizeConnection, publicConnection } from '../native/store.js'
 import { CredentialStore } from '../native/credential-store.js'
+import { WorkspaceStore } from '../native/workspace-store.js'
+import { MysqlBrowserService } from '../native/service.js'
+import { METHODS } from '../shared/protocol.js'
 
 const sample = {
   id: 'local-test',
@@ -49,3 +52,36 @@ test('normalizes production defaults more strictly', () => {
   assert.equal(value.queryTimeoutMs, 8000)
 })
 
+test('workspace preferences survive extension storage replacement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'mysql-browser-workspace-'))
+  const path = join(root, 'workspace.json')
+  const store = new WorkspaceStore(path)
+  assert.equal(await store.load(), null)
+
+  const workspace = {
+    tablePreferences: {
+      '["local-test","demo"]': {
+        vehicle_base: { position: 'top', color: '#4ade80' },
+      },
+    },
+  }
+  await store.save(workspace)
+
+  assert.deepEqual(await new WorkspaceStore(path).load(), workspace)
+  assert.equal((await stat(path)).mode & 0o777, 0o600)
+})
+
+test('native service exposes workspace load and save methods', async () => {
+  let workspace = null
+  const service = new MysqlBrowserService({
+    workspace: {
+      async load() { return workspace },
+      async save(value) { workspace = value; return value },
+    },
+  })
+
+  const value = { tablePreferences: { demo: { users: { position: 'top' } } } }
+  assert.deepEqual(await service.handle(METHODS.WORKSPACE_GET), { ok: true, value: { workspace: null } })
+  assert.deepEqual(await service.handle(METHODS.WORKSPACE_SET, { workspace: value }), { ok: true, value: { workspace: value } })
+  assert.deepEqual(await service.handle(METHODS.WORKSPACE_GET), { ok: true, value: { workspace: value } })
+})

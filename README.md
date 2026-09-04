@@ -6,13 +6,13 @@
 
 - MySQL 连接新增、编辑、测试和删除
 - 数据库、表和视图浏览
-- 双击表名称自动填写并运行 SELECT 查询
+- 单击表名称即可选择该表，并自动填写及运行 `SELECT * FROM \`表名\` LIMIT 20`
 - 字段、索引和外键查看
 - SQL 多页签编辑与查询
 - `EXPLAIN` 执行计划
 - SELECT、INSERT、UPDATE、DELETE 和常用 DDL
 - 写操作确认、生产环境双重确认
-- 查询结果 CSV / 文本导出
+- 查询结果 CSV 导出和完整表格复制
 - SQL 审计摘要
 - 表置顶、表下沉、表名颜色
 - 点击扩展图标直接打开独立大工作台
@@ -21,6 +21,10 @@
 - 翡翠暗色、深海蓝、琥珀暗色、明亮灰白主题切换
 - 表名、字段名、别名、SQL 关键字自动补全
 - 结果行右键复制 JSON、INSERT、UPDATE、DELETE SQL
+- 表名右键可直接“选择此表”
+- 结果行右键可复制为“字段标题行 + 数据值行”的表格
+- 结果表头字段右键可按时间、数值、文本类型快捷写入 WHERE、LIKE、IN、BETWEEN、ORDER BY 等 SQL
+- 支持安全只读 SQL 脚本：同一连接内依次执行 `SET @用户变量`、`SELECT`、`SHOW`、`DESCRIBE`
 
 ## 架构
 
@@ -104,15 +108,21 @@ dist/mysql-browser-client.zip
 ```text
 ~/.mysql-browser-client/connections.json
 ~/.mysql-browser-client/credentials.json
+~/.mysql-browser-client/workspace.json
 ~/.mysql-browser-client/native-host/
 ```
 
-扩展侧的查询页签、表排序和颜色偏好保存在 `chrome.storage.local`。
+查询页签、表排序和颜色偏好会保存在 `~/.mysql-browser-client/workspace.json`，并同时缓存到
+`chrome.storage.local`。因此即使删除后重新安装扩展，只要本地数据目录仍在，这些设置也会自动恢复。
+
+升级本地扩展时，优先在 `chrome://extensions` 中点击“重新加载”，不要先删除旧扩展。即使误删，
+重新安装并执行 `npm run native:install` 后也会从 Native Host 的工作区文件恢复。
 
 ## 安全限制
 
-- 每次只允许执行一条 SQL
-- 禁止 SQL 注释、锁表语句、`LOAD_FILE`、`SLEEP`、`BENCHMARK` 等高风险能力
+- 普通查询和写操作每次只允许执行一条 SQL
+- 多语句仅开放安全只读脚本模式，禁止 `SET SESSION/GLOBAL`、系统变量、动态 SQL 和任何写操作
+- 执行前过滤 SQL 注释，并禁止锁表语句、`LOAD_FILE`、`SLEEP`、`BENCHMARK` 等高风险能力
 - 查询行数受连接配置限制
 - 生产环境进入前确认
 - 写操作执行前确认，生产写操作双重确认
