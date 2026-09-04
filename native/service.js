@@ -559,7 +559,7 @@ export class MysqlBrowserService {
   async handle(method, rawParams = {}) {
     try {
       const params = assertPayload(rawParams)
-      if (method === METHODS.PING) return ok({ status: 'ready', version: '0.2.8', platform: process.platform })
+      if (method === METHODS.PING) return ok({ status: 'ready', version: '0.2.9', platform: process.platform })
       if (method === METHODS.CONNECTIONS) return ok(await this.listConnections())
       if (method === METHODS.CONNECTION_CREATE) return ok(await this.createConnection(params))
       if (method === METHODS.CONNECTION_UPDATE) return ok(await this.updateConnection(params))

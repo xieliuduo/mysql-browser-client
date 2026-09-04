@@ -1,6 +1,6 @@
 {
   "name": "mysql-browser-client",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "description": "A local-first MySQL workbench for Chromium browsers",
   "type": "module",
   "private": true,

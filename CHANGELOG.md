@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.9] - 2026-09-04
+
+### Changed
+
+- Replaced the default extension artwork with a deep-green and bright-green database icon.
+- Added dedicated `16`, `32`, `48`, and `128` pixel icons for the browser toolbar, extension manager, and workbench favicon.
+
 ## [0.2.8] - 2026-09-04
 
 ### Added
